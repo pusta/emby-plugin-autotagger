@@ -1,0 +1,72 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Emby Server loads plugins as .NET Standard 2.0 assemblies. This is not negotiable and
+         is the single largest structural difference from the Jellyfin build of this plugin,
+         which targets net8.0/net9.0 against Jellyfin.Controller. -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>AutoTagger</AssemblyName>
+    <RootNamespace>AutoTagger</RootNamespace>
+
+    <Version>1.0.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+
+    <LangVersion>latest</LangVersion>
+    <!-- Emby's public API is not nullable-annotated, so nullable reference types are off.
+         The Jellyfin template enabled them along with TreatWarningsAsErrors and StyleCop;
+         none of that applies here and enabling it would produce thousands of warnings from
+         Emby's own surface. -->
+    <Nullable>disable</Nullable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- ==========================================================================
+       Reference mode.
+
+       nuget (default) - resolves Emby's published plugin API from nuget.org.
+       local           - references the assemblies from an installed Emby Server,
+                         which is the only way to build against a beta or a version
+                         that has no matching package. Use:
+
+                           dotnet build -p:EmbyRefMode=local -p:EmbyDir=/path/to/emby/system
+
+       EmbyApiVersion pins the NuGet package. Build against a version at or below your
+       server's, never above it. See the table in README.md.
+       ========================================================================== -->
+  <PropertyGroup>
+    <EmbyRefMode Condition="'$(EmbyRefMode)' == ''">nuget</EmbyRefMode>
+    <EmbyApiVersion Condition="'$(EmbyApiVersion)' == ''">4.8.11</EmbyApiVersion>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(EmbyRefMode)' == 'nuget'">
+    <PackageReference Include="MediaBrowser.Server.Core" Version="$(EmbyApiVersion)" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(EmbyRefMode)' == 'local'">
+    <Reference Include="MediaBrowser.Common">
+      <HintPath>$(EmbyDir)/MediaBrowser.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Controller">
+      <HintPath>$(EmbyDir)/MediaBrowser.Controller.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Model">
+      <HintPath>$(EmbyDir)/MediaBrowser.Model.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- The configuration page and dashboard icon are served out of the assembly itself.
+       Emby resolves them by "<RootNamespace>.<folder>.<file>", so these paths and the
+       strings in Plugin.cs must stay in step. -->
+  <ItemGroup>
+    <None Remove="Configuration\configPage.html" />
+    <None Remove="thumb.png" />
+    <EmbeddedResource Include="Configuration\configPage.html" />
+    <EmbeddedResource Include="thumb.png" />
+  </ItemGroup>
+
+</Project>
