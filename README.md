@@ -68,6 +68,10 @@ The rest:
 - Library matching tries the stored id against both the internal row id and the GUID, then falls back
   to the library name. This is deliberate defensiveness about how Emby identifies libraries — see the
   porting notes.
+- The configuration page is two embedded resources, not one: `configPage.html` is a fragment, and
+  `configPage.js` is the AMD module named by its `data-controller` attribute and registered as a
+  second page in `GetPages()`. Emby 4.x does not execute an inline `<script>` in a plugin page; the
+  porting notes explain the rest of that difference.
 
 ### A note on how Emby merges tags
 

@@ -87,7 +87,20 @@ namespace AutoTagger
             return type.Assembly.GetManifestResourceStream(type.Namespace + ".thumb.png");
         }
 
-        /// <inheritdoc />
+        /// <summary>
+        /// Gets the pages served to the dashboard: the configuration page itself, and the script
+        /// that drives it.
+        /// </summary>
+        /// <returns>The page descriptors.</returns>
+        /// <remarks>
+        /// The script is a separate page rather than an inline &lt;script&gt; block in the HTML.
+        /// Emby's dashboard loads a plugin page as a view and runs its behaviour from an AMD module
+        /// named by the page's <c>data-controller</c> attribute — <c>__plugin/&lt;name&gt;</c>,
+        /// resolving to the second entry below. This is the pattern Emby's own plugins use; a page
+        /// carrying its own inline script is the pre-4.x style, and its script does not run.
+        /// Jellyfin, by contrast, executes inline script in a configuration page, which is why the
+        /// sibling project has one file here and this one has two.
+        /// </remarks>
         public IEnumerable<PluginPageInfo> GetPages()
         {
             return new[]
@@ -97,6 +110,13 @@ namespace AutoTagger
                     // Single token, no spaces: this value ends up in the dashboard page URL.
                     Name = "AutoTagger",
                     EmbeddedResourcePath = GetType().Namespace + ".Configuration.configPage.html"
+                },
+                new PluginPageInfo
+                {
+                    // Referenced as data-controller="__plugin/autotaggerjs" in configPage.html.
+                    // Kept lower case so the two spellings cannot drift apart.
+                    Name = "autotaggerjs",
+                    EmbeddedResourcePath = GetType().Namespace + ".Configuration.configPage.js"
                 }
             };
         }

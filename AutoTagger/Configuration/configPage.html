@@ -1,264 +1,68 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Auto Tagger</title>
-</head>
-<body>
-    <div id="autoTaggerConfigPage"
-         data-role="page"
-         class="page type-interior pluginConfigurationPage autoTaggerConfigPage"
-         data-require="emby-input,emby-button,emby-checkbox">
-        <div data-role="content">
-            <div class="content-primary">
-                <form class="autoTaggerConfigForm">
-                    <h1>Auto Tagger</h1>
+<div is="emby-scroller"
+     class="view flex flex-direction-column scrollFrameY flex-grow"
+     data-horizontal="false"
+     data-forcescrollbar="true"
+     data-centerfocus="true"
+     data-bindheader="true"
+     data-controller="__plugin/autotaggerjs"
+     data-title="Auto Tagger">
+    <div class="scrollSlider flex-grow flex-direction-column padded-left padded-left-page padded-right padded-top-page padded-bottom-page">
 
-                    <p>
-                        Enter comma-separated tags for each library. Items added to that library are
-                        tagged automatically. Leave a library blank to skip it. Tagging is additive:
-                        existing tags are never removed.
-                    </p>
-                    <p>
-                        If an item already carries one of a library's skip tags, that library's tags
-                        are not applied to it. Listing the same tag in both boxes makes the library
-                        tag its items once and then leave them alone.
-                    </p>
-                    <p>
-                        To apply tags to items that are already in a library, run
-                        <strong>Apply auto-tags to existing items</strong> from
-                        Dashboard &rarr; Scheduled Tasks.
-                    </p>
+        <form class="autoTaggerConfigForm auto-center">
 
-                    <div id="autoTaggerLibraries" style="margin-top: 1.5em;">
-                        <p>Loading libraries&hellip;</p>
-                    </div>
+            <p>
+                Enter comma-separated tags for each library. Items added to that library are tagged
+                automatically. Leave a library blank to skip it. Tagging is additive: existing tags
+                are never removed.
+            </p>
+            <p>
+                If an item already carries one of a library's skip tags, that library's tags are not
+                applied to it. Listing the same tag in both boxes makes the library tag its items
+                once and then leave them alone.
+            </p>
+            <p>
+                To apply tags to items that are already in a library, run
+                <strong>Apply auto-tags to existing items</strong> from
+                Dashboard &rarr; Scheduled Tasks.
+            </p>
 
-                    <br />
-
-                    <label class="checkboxContainer">
-                        <input is="emby-checkbox" type="checkbox" id="autoTaggerTagEpisodes" />
-                        <span>Also tag seasons and episodes</span>
-                    </label>
-                    <div class="fieldDescription checkboxFieldDescription">
-                        Off by default, so only movies and series are tagged. Tag a series and check
-                        whether restricted users are blocked from its episodes before turning this on
-                        &mdash; it writes one database row per episode.
-                    </div>
-
-                    <br />
-
-                    <label class="checkboxContainer">
-                        <input is="emby-checkbox" type="checkbox" id="autoTaggerLockTags" />
-                        <span>Lock the Tags field after tagging</span>
-                    </label>
-                    <div class="fieldDescription checkboxFieldDescription">
-                        Not recommended. A locked Tags field is skipped by the metadata providers, so
-                        the item keeps the tags configured here and gains no others, and it cannot be
-                        edited from the web UI until it is unlocked. Leave this off: the configured
-                        tags are re-applied automatically after any refresh that replaces them.
-                    </div>
-
-                    <br />
-
-                    <div>
-                        <button is="emby-button" type="submit" class="raised button-submit block">
-                            <span>Save</span>
-                        </button>
-                    </div>
-                </form>
+            <div class="autoTaggerLibraries">
+                <p>Loading libraries&hellip;</p>
             </div>
-        </div>
 
-        <script type="text/javascript">
-            (function () {
-                var pluginId = 'ddd2f8f0-cd06-41a9-a5c2-2b6e54160596';
-                var page = document.querySelector('#autoTaggerConfigPage');
+            <div class="checkboxContainer checkboxContainer-withDescription">
+                <label>
+                    <input is="emby-checkbox" type="checkbox" class="autoTaggerTagEpisodes" />
+                    <span>Also tag seasons and episodes</span>
+                </label>
+                <div class="fieldDescription checkboxFieldDescription">
+                    Off by default, so only movies and series are tagged. Tag a series and check
+                    whether restricted users are blocked from its episodes before turning this on
+                    &mdash; it writes one database row per episode.
+                </div>
+            </div>
 
-                // Emby reports library ids as numeric strings, but the same rule may have been
-                // saved against a GUID by an older build, or match on name alone. The matching
-                // here mirrors Tagger.MatchesLibrary on the server side.
-                function ruleFor(config, folder) {
-                    var rules = config.Rules || [];
-                    for (var i = 0; i < rules.length; i++) {
-                        var rule = rules[i];
-                        if (!rule) {
-                            continue;
-                        }
-                        if (rule.LibraryId && folder.ItemId && String(rule.LibraryId) === String(folder.ItemId)) {
-                            return rule;
-                        }
-                        if (rule.LibraryName && folder.Name &&
-                            rule.LibraryName.toLowerCase() === folder.Name.toLowerCase()) {
-                            return rule;
-                        }
-                    }
-                    return null;
-                }
+            <div class="checkboxContainer checkboxContainer-withDescription">
+                <label>
+                    <input is="emby-checkbox" type="checkbox" class="autoTaggerLockTags" />
+                    <span>Lock the Tags field after tagging</span>
+                </label>
+                <div class="fieldDescription checkboxFieldDescription">
+                    Not recommended. A locked Tags field is skipped by the metadata providers, so the
+                    item keeps the tags configured here and gains no others, and it cannot be edited
+                    from the web UI until it is unlocked. Leave this off: the configured tags are
+                    re-applied automatically after any refresh that replaces them.
+                </div>
+            </div>
 
-                function tagInput(id, value, placeholder) {
-                    var input = document.createElement('input');
-                    input.setAttribute('is', 'emby-input');
-                    input.setAttribute('type', 'text');
-                    input.className = 'emby-input';
-                    input.id = id;
-                    input.value = value;
-                    input.placeholder = placeholder;
-                    return input;
-                }
+            <br />
 
-                function labelFor(id, text) {
-                    var label = document.createElement('label');
-                    label.className = 'inputLabel';
-                    label.setAttribute('for', id);
-                    label.textContent = text;
-                    return label;
-                }
+            <div>
+                <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                    <span>Save</span>
+                </button>
+            </div>
 
-                function renderLibraries(config, folders) {
-                    var container = page.querySelector('#autoTaggerLibraries');
-                    container.innerHTML = '';
-
-                    if (!folders || !folders.length) {
-                        container.innerHTML = '<p>No libraries found. Add a library first, then return here.</p>';
-                        return;
-                    }
-
-                    folders.forEach(function (folder, index) {
-                        var rule = ruleFor(config, folder);
-
-                        // Only used to pair each input with its label, so it has to be a legal
-                        // element id: library names can contain spaces and punctuation.
-                        var key = String(folder.ItemId || folder.Name || index)
-                            .replace(/[^A-Za-z0-9_-]/g, '_') + '_' + index;
-                        var tags = rule && rule.Tags ? rule.Tags.join(', ') : '';
-                        var excludeTags = rule && rule.ExcludeTags ? rule.ExcludeTags.join(', ') : '';
-
-                        var wrapper = document.createElement('div');
-                        wrapper.className = 'autoTaggerLibrary';
-                        wrapper.style.marginBottom = '1.5em';
-                        wrapper.setAttribute('data-library-id', folder.ItemId || '');
-                        wrapper.setAttribute('data-library-name', folder.Name || '');
-
-                        var heading = document.createElement('h3');
-                        heading.textContent = folder.Name +
-                            (folder.CollectionType ? ' (' + folder.CollectionType + ')' : '');
-                        wrapper.appendChild(heading);
-
-                        var tagsContainer = document.createElement('div');
-                        tagsContainer.className = 'inputContainer';
-                        var tagsInput = tagInput('autoTaggerTags_' + key, tags, 'e.g. kids, family-safe');
-                        tagsInput.className += ' autoTaggerTagsInput';
-                        tagsContainer.appendChild(labelFor(tagsInput.id, 'Tags to apply'));
-                        tagsContainer.appendChild(tagsInput);
-                        wrapper.appendChild(tagsContainer);
-
-                        var excludeContainer = document.createElement('div');
-                        excludeContainer.className = 'inputContainer';
-                        var excludeInput = tagInput('autoTaggerExclude_' + key, excludeTags, 'e.g. manual-review');
-                        excludeInput.className += ' autoTaggerExcludeInput';
-                        excludeContainer.appendChild(labelFor(excludeInput.id, 'Skip items already tagged'));
-                        excludeContainer.appendChild(excludeInput);
-
-                        var excludeHint = document.createElement('div');
-                        excludeHint.className = 'fieldDescription';
-                        excludeHint.textContent = 'Leave empty to tag everything in this library.';
-                        excludeContainer.appendChild(excludeHint);
-                        wrapper.appendChild(excludeContainer);
-
-                        container.appendChild(wrapper);
-                    });
-                }
-
-                function parseTags(value) {
-                    return value
-                        .split(',')
-                        .map(function (tag) { return tag.trim(); })
-                        .filter(function (tag) { return tag.length > 0; });
-                }
-
-                function collectRules() {
-                    var rules = [];
-                    var rows = page.querySelectorAll('#autoTaggerLibraries .autoTaggerLibrary');
-
-                    for (var i = 0; i < rows.length; i++) {
-                        var row = rows[i];
-                        var input = row.querySelector('.autoTaggerTagsInput');
-                        if (!input) {
-                            continue;
-                        }
-
-                        var tags = parseTags(input.value);
-
-                        // A library with no tags to apply has nothing to exclude from, so it is
-                        // not stored at all.
-                        if (!tags.length) {
-                            continue;
-                        }
-
-                        var excludeInput = row.querySelector('.autoTaggerExcludeInput');
-
-                        rules.push({
-                            LibraryId: row.getAttribute('data-library-id') || '',
-                            LibraryName: row.getAttribute('data-library-name') || '',
-                            Tags: tags,
-                            ExcludeTags: excludeInput ? parseTags(excludeInput.value) : []
-                        });
-                    }
-
-                    return rules;
-                }
-
-                function getVirtualFolders() {
-                    if (typeof ApiClient.getVirtualFolders === 'function') {
-                        return ApiClient.getVirtualFolders();
-                    }
-                    return ApiClient.getJSON(ApiClient.getUrl('Library/VirtualFolders'));
-                }
-
-                function load() {
-                    Dashboard.showLoadingMsg();
-
-                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                        page.querySelector('#autoTaggerTagEpisodes').checked = config.TagEpisodesAndSeasons === true;
-                        page.querySelector('#autoTaggerLockTags').checked = config.LockTags === true;
-
-                        getVirtualFolders().then(function (folders) {
-                            renderLibraries(config, folders);
-                            Dashboard.hideLoadingMsg();
-                        }, function () {
-                            page.querySelector('#autoTaggerLibraries').innerHTML =
-                                '<p>Could not load the library list.</p>';
-                            Dashboard.hideLoadingMsg();
-                        });
-                    });
-                }
-
-                function save() {
-                    Dashboard.showLoadingMsg();
-
-                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                        config.Rules = collectRules();
-                        config.TagEpisodesAndSeasons = page.querySelector('#autoTaggerTagEpisodes').checked;
-                        config.LockTags = page.querySelector('#autoTaggerLockTags').checked;
-
-                        ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
-                            Dashboard.processPluginConfigurationUpdateResult(result);
-                        });
-                    });
-                }
-
-                page.querySelector('.autoTaggerConfigForm').addEventListener('submit', function (e) {
-                    save();
-                    e.preventDefault();
-                    return false;
-                });
-
-                page.addEventListener('pageshow', load);
-
-                // Emby may have already fired pageshow before this script ran.
-                load();
-            })();
-        </script>
+        </form>
     </div>
-</body>
-</html>
+</div>

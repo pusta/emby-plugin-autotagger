@@ -83,18 +83,44 @@ Emby's `IScheduledTask` differs from Jellyfin's in three ways:
 Both the name and the argument order of the execute method changed, so this will not compile by
 accident — which is the good outcome.
 
-### Configuration page
+### Configuration page: two files, not one
 
-Same general shape — an embedded HTML resource resolved by
-`"<RootNamespace>.Configuration.configPage.html"` — but the wrapper markup differs. Emby pages are a
-full HTML document with a `data-role="page"` div carrying
-`class="page type-interior pluginConfigurationPage"` and a `data-require` attribute listing the Emby
-web components used (`emby-input`, `emby-button`, `emby-checkbox`). The `ApiClient` and `Dashboard`
-globals are broadly the same, and jQuery is available in Emby's dashboard, though this page uses
-vanilla DOM APIs so it does not depend on that.
+The biggest practical difference, and the one that cost the most to get wrong. Jellyfin serves a
+configuration page as a single HTML document with an inline `<script>` that runs on `pageshow`. Emby
+4.x does not run that script at all. Its dashboard loads a plugin page as a **view**: the HTML is a
+fragment injected into the existing document, and its behaviour comes from an AMD module named by the
+fragment's `data-controller` attribute.
 
-`load()` is called both from the `pageshow` event and directly, because depending on how Emby injects
-the page the event may already have fired before the inline script runs.
+| | Jellyfin | Emby 4.x |
+| --- | --- | --- |
+| Page markup | Full document, `<html>`/`<head>`/`<body>` | Fragment only — no document wrapper |
+| Root element | `<div data-role="page" class="page type-interior pluginConfigurationPage">` | `<div is="emby-scroller" class="view …" data-controller="__plugin/<name>" data-title="…">` |
+| Behaviour | Inline `<script>` in the page | Separate JS resource, registered as a second `PluginPageInfo` |
+| Load hook | `pageshow` event | `View.prototype.onResume` |
+| Dependencies | `data-require` attribute | `define([…])` dependency list |
+| Loading spinner | `Dashboard.showLoadingMsg()` | `loading.show()` from the `loading` module |
+
+Three traps behind that table, all of which this project hit:
+
+1. **A full HTML document renders as garbage.** Nesting `<html>`/`<body>` inside the dashboard's own
+   document leaves the content stacked behind the current page. The page must be a fragment.
+2. **`pageshow` cannot be caught with `addEventListener`.** Emby's dashboard raises it through
+   jQuery, and a jQuery-triggered custom event never reaches a native listener — plugins written in
+   the old style use `$(page).on('pageshow', …)` for exactly this reason. `onResume` avoids the
+   question.
+3. **`document.createElement('input')` plus `setAttribute('is', 'emby-input')` does not produce an
+   emby-input.** Customized built-in elements only upgrade when parsed from markup, so rows built
+   for each library are assembled as an HTML string and assigned through `innerHTML`, with every
+   interpolated value escaped. This is what the Jellyfin page does too, though there it is a style
+   choice rather than a requirement.
+
+The reference for all of this is Emby's own [Anime plugin](https://github.com/MediaBrowser/Emby.Plugins.Anime/tree/master/MediaBrowser.Plugins.Anime/Configuration),
+which is the closest thing to a current, working example in Emby's published source. Plenty of
+third-party plugins still ship the pre-4.x style — a full document with an inline jQuery script — so
+copying an arbitrary plugin is not safe.
+
+`ApiClient` and `Dashboard` remain globals in both, and `ApiClient.getVirtualFolders()` exists on
+Emby's JavaScript client (it maps `ItemId` onto `Id`, so either field identifies a library).
 
 ### Plugin icon
 
