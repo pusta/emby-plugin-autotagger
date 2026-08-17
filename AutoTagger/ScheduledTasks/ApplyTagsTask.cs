@@ -160,7 +160,7 @@ namespace AutoTagger.ScheduledTasks
         /// enumerated and matched with the same <c>Tagger.MatchesLibrary</c> the live handler uses,
         /// which keeps the two from ever disagreeing about which rule covers which library.
         /// </remarks>
-        private List<Folder> GetWatchedFolders(PluginConfiguration configuration)
+        private List<Folder> GetWatchedFolders(PluginOptions configuration)
         {
             return GetLibraryFolders()
                 .Where(folder => configuration.Rules.Any(rule =>

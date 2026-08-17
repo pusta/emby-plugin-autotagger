@@ -38,7 +38,7 @@ namespace AutoTagger.Services
             _logger = logManager.GetLogger("AutoTagger");
         }
 
-        private static PluginConfiguration Configuration
+        private static PluginOptions Configuration
         {
             get
             {
@@ -62,7 +62,7 @@ namespace AutoTagger.Services
         /// meant to touch. Missing/unaired placeholder entries are excluded as well: they have no
         /// file behind them and Emby recreates them on the next scan.
         /// </remarks>
-        public static bool IsTaggable(BaseItem item, PluginConfiguration configuration)
+        public static bool IsTaggable(BaseItem item, PluginOptions configuration)
         {
             if (item == null || configuration == null)
             {
@@ -98,7 +98,7 @@ namespace AutoTagger.Services
         /// The names are taken from the types themselves so a rename cannot silently produce a
         /// query that matches nothing.
         /// </remarks>
-        public static string[] GetTaggableTypeNames(PluginConfiguration configuration)
+        public static string[] GetTaggableTypeNames(PluginOptions configuration)
         {
             var names = new List<string>
             {
