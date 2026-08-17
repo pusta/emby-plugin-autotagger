@@ -26,7 +26,7 @@ namespace AutoTagger.Configuration
         public PluginOptions()
         {
             Rules = new LibraryTagRule[0];
-            LibraryRules = new EditableObjectCollection();
+            LibraryRules = new LibraryRuleRowCollection();
             TagEpisodesAndSeasons = false;
             LockTags = false;
         }
@@ -56,7 +56,7 @@ namespace AutoTagger.Configuration
         /// into <see cref="Rules"/> on save. It is the editor surface, not the stored data.
         /// </remarks>
         [DisplayName("Tags by library")]
-        public EditableObjectCollection LibraryRules { get; set; }
+        public LibraryRuleRowCollection LibraryRules { get; set; }
 
         /// <summary>
         /// Gets or sets the stored rules. This is the authoritative copy that the tagger reads.

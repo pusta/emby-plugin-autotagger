@@ -148,18 +148,11 @@ namespace AutoTagger
                 return base.OnOptionsSaving(null);
             }
 
-            var rows = options.LibraryRules == null
-                ? new List<LibraryRuleRow>()
-                : options.LibraryRules.OfType<LibraryRuleRow>().ToList();
-
-            // If rows came back but none of them are ours, the edit framework handed back
-            // something this build does not understand. Rebuilding from that would silently wipe
-            // every configured rule, so keep what is already stored and say so in the log.
-            if (rows.Count == 0 && options.LibraryRules != null && options.LibraryRules.Count > 0)
+            // A save that carries no rows at all is not an instruction to delete every rule — it
+            // means the page posted something this build did not expect. Keep what is stored.
+            if (options.LibraryRules == null)
             {
-                _logger.Error(
-                    "Auto Tagger could not read the {0} rows posted by the settings page; keeping the stored rules unchanged",
-                    options.LibraryRules.Count);
+                _logger.Error("Auto Tagger received a save with no library rows; keeping the stored rules unchanged");
 
                 var current = GetOptions();
                 options.Rules = current == null ? new LibraryTagRule[0] : current.Rules;
@@ -167,7 +160,7 @@ namespace AutoTagger
                 return base.OnOptionsSaving(options);
             }
 
-            options.Rules = RuleRows.ToRules(rows);
+            options.Rules = RuleRows.ToRules(options.LibraryRules);
 
             _logger.Info("Auto Tagger saved {0} library rules", options.Rules.Length);
 

@@ -119,15 +119,43 @@ What was tried first, so it is not tried again:
 The working reference for the declarative route is [StrmAssistant](https://github.com/sjtuross/StrmAssistant/tree/HEAD/StrmAssistant/Options),
 a current plugin that uses it against 4.8 and 4.9.
 
+#### Do not use `EditableObjectCollection` for a repeating list
+
+Emby's documentation points at `EditableObjectCollection` for "a dynamic number of child options",
+and it renders correctly — but nothing can read it back. It is a `List<EditableObjectBase>`, and
+`EditableObjectBase` is abstract, so the serializer has no concrete type to construct:
+
+```
+NotSupportedException: Deserialization of interface or abstract types is not supported.
+Type 'Emby.Web.GenericEdit.EditableObjectBase'. Path: $.LibraryRules[0]
+```
+
+That matters because the whole options object is round-tripped through JSON twice: the settings page
+posts it back to `EditableObjectBase.DeserializeFromJsonString`, and the options store reloads it at
+start-up through `DeserializeFromJsonStream`. Both do
+`serializer.DeserializeFromString(json, GetType()) as IEditableObject` — and when the deserialize
+fails, the `as` produces null, which the caller dereferences. In the dashboard that surfaces as
+**"Object reference not set to an instance of an object"** when you press Save. Neither method is
+virtual in any useful sense (they satisfy an interface and cannot be overridden), so the fix has to
+be in the shape of the data rather than in a hook.
+
+`LibraryRuleRowCollection` is that fix: it derives from `List<LibraryRuleRow>` — a concrete element
+type the serializer can construct — and implements `IEditableObjectCollection`, which asks only for
+`IEnumerable<IEditableObject>`. The editor renders it identically, because that interface is what the
+editor builder keys on.
+
+One wrinkle to know about: the collection then implements `IEnumerable<T>` twice, so LINQ over it
+needs the element type pinned (`RuleRows.ToRules` takes `IEnumerable<LibraryRuleRow>`, which resolves
+it at the call site).
+
 Two consequences worth knowing:
 
 - **The rows are display state, not storage.** `PluginOptions.Rules` — a plain `LibraryTagRule[]`,
   `[Browsable(false)]` — is what the tagger reads. `OnBeforeShowUI` builds one row per library from
   it, and `OnOptionsSaving` folds the edited rows back. Storing the plain array rather than the
-  collection keeps the plugin's actual data independent of how the edit framework round-trips a
-  polymorphic collection, and lets `RuleRows` be tested without a server. If a save ever comes back
-  with rows this build cannot read, `OnOptionsSaving` keeps the stored rules and logs an error
-  rather than wiping them.
+  collection keeps the plugin's actual data independent of how the edit framework round-trips the
+  editor surface, and lets `RuleRows` be tested without a server. If a save ever arrives with no
+  rows at all, `OnOptionsSaving` keeps the stored rules and logs an error rather than wiping them.
 - **Settings do not migrate.** `BasePluginSimpleUI` persists through its own options store, not as
   the `AutoTagger.xml` that `BasePlugin<TConfiguration>` wrote. Anything saved by an earlier build
   of this plugin has to be entered again.

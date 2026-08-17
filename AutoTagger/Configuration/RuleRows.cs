@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Emby.Web.GenericEdit;
 using MediaBrowser.Model.Entities;
 
 namespace AutoTagger.Configuration
@@ -21,9 +20,9 @@ namespace AutoTagger.Configuration
         /// <param name="folders">The server's libraries.</param>
         /// <param name="stored">The stored rules.</param>
         /// <returns>The rows to display, in library order.</returns>
-        public static EditableObjectCollection Build(IEnumerable<VirtualFolderInfo> folders, LibraryTagRule[] stored)
+        public static LibraryRuleRowCollection Build(IEnumerable<VirtualFolderInfo> folders, LibraryTagRule[] stored)
         {
-            var rows = new EditableObjectCollection();
+            var rows = new LibraryRuleRowCollection();
 
             if (folders == null)
             {
