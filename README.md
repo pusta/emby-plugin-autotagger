@@ -5,25 +5,79 @@ Applies configured tags to media as it is added to selected libraries.
 Intended for tag-based parental controls: map a library to a tag, then use that tag in each
 user's **Allowed tags** / **Blocked tags** policy.
 
-This is the Emby port of the Jellyfin plugin of the same name. The two are separate projects
-rather than one codebase with a shared abstraction layer — see [PORTING-NOTES.md](PORTING-NOTES.md)
-for what changed and why.
-
-> **Read this before you build.** Emby Server is closed source. Every API call in this project was
-> written against Emby's published plugin API and real community plugin source, but it has **not
-> been compiled against Emby's assemblies**, because the reference package could not be restored in
-> the environment where it was written. Expect to spend a short round of fixing signature mismatches
-> on first build. [PORTING-NOTES.md](PORTING-NOTES.md) lists every call worth checking, ranked by how
-> likely it is to need adjusting, and each one is a one-line fix in a known location.
+This is the Emby port of the Jellyfin plugin of the same name, and is kept at feature parity with
+it — the version number matches the Jellyfin build's, so a given number means the same feature set
+on both servers. The two are separate projects rather than one codebase with a shared abstraction
+layer; see [PORTING-NOTES.md](PORTING-NOTES.md) for what differs and why.
 
 ## Configuration
 
-**Dashboard → Plugins → Auto Tagger.** Every library is listed with a text field; enter
-comma-separated tags, or leave a library blank to skip it. Tagging is additive — existing tags
-are never removed.
+**Dashboard → Plugins → Auto Tagger.** Every library is listed with two fields:
+
+| Field | Meaning |
+| --- | --- |
+| **Tags to apply** | Comma-separated tags written to items in this library. Leave blank to skip the library entirely. |
+| **Skip items already tagged** | Comma-separated tags that suppress this library's rule. An item already carrying any of them is left alone. Leave blank to tag everything. |
+
+Tagging is additive — existing tags are never removed. An item that lives in two watched libraries
+receives the union of both rule sets; a rule suppressed by an exclusion contributes nothing, but the
+other libraries' rules still apply.
+
+Two further options:
+
+**Also tag seasons and episodes.** Off by default, so only movies and series are tagged. Tag a
+series and check whether restricted users are actually blocked from its episodes before turning this
+on — it writes one database row per episode.
+
+**Lock the Tags field after tagging.** Off by default, and best left that way. A locked field is
+skipped entirely by Emby's metadata providers, so the item keeps the tags configured here and gains
+none of the ones its metadata source would have supplied, and you cannot edit tags by hand in the UI
+until you unlock the field on that item. Leaving it off is safe because the configured tags are
+re-applied automatically after any refresh that replaces them.
 
 New items are tagged as they arrive. To tag items already in a library, run **Apply auto-tags to
 existing items** from Dashboard → Scheduled Tasks.
+
+## How it works
+
+`AutoTagEntryPoint` is an `IServerEntryPoint` — Emby discovers it automatically, there is nothing to
+register — and it subscribes to two library events, which together are what makes tagging survive a
+metadata refresh:
+
+- **`ItemAdded`** fires from `LibraryManager.CreateItems`, as soon as the item row is written and
+  *before* the metadata providers have run. Tags are applied here so that an item which never
+  triggers a refresh save still gets them. The Tags field is deliberately **not** locked on this
+  path: locking it before the first refresh would pre-empt the providers entirely.
+- **`ItemUpdated`** fires after a provider has saved the item. Only `MetadataImport` and
+  `MetadataDownload` are acted on — the plugin's own writes use `MetadataEdit`, so a tag write
+  cannot re-enter the handler that made it. This is where tags discarded by a "replace all metadata"
+  refresh are restored, and the only point at which locking the field is safe.
+
+Both events are raised synchronously on the scan thread, so the work is handed to the thread pool
+and every exception is caught: a tagging failure must never propagate back into a library scan. If
+no rules are configured, the handler returns before the thread pool is involved.
+
+The rest:
+
+- `Tagger` resolves an item's libraries via `ILibraryManager.GetCollectionFolders`, unions the tags
+  from every matching rule, drops rules suppressed by an exclusion, and writes with
+  `UpdateToRepository`.
+- `ApplyTagsTask` is a manual scheduled task that backfills existing items. It queries only the item
+  types that are eligible for tagging, and locks the Tags field when configured to, because those
+  items' metadata has already been fetched.
+- Library matching tries the stored id against both the internal row id and the GUID, then falls back
+  to the library name. This is deliberate defensiveness about how Emby identifies libraries — see the
+  porting notes.
+
+### A note on how Emby merges tags
+
+Emby's provider merge (`ProviderUtils.MergeBaseItemData`) assigns `target.Tags = source.Tags` when
+the refresh replaces data **or** when the item has no tags yet. It does not union the two sets, which
+is where it differs from Jellyfin. Two consequences worth knowing:
+
+- A "replace all metadata" refresh wipes the configured tags. The `ItemUpdated` hook above puts them
+  back; without it, tagging would silently come undone on refresh.
+- Once an item carries tags, an ordinary refresh will not add provider tags to it, locked or not.
 
 ## Building
 
@@ -31,7 +85,8 @@ existing items** from Dashboard → Scheduled Tasks.
 dotnet build AutoTagger.sln -c Release
 ```
 
-Output lands at `AutoTagger/bin/Release/netstandard2.0/AutoTagger.dll`.
+Output lands at `AutoTagger/bin/Release/netstandard2.0/AutoTagger.dll`. That single DLL is the whole
+plugin; nothing else in the output directory needs to be deployed.
 
 By default the build resolves Emby's plugin API from NuGet. To build against the assemblies from an
 installed server instead — necessary for a beta, or any version without a matching package:
@@ -55,10 +110,17 @@ dotnet build AutoTagger.sln -c Release -p:EmbyApiVersion=4.9.1.90
 | 4.9.x | `4.9.1.90`, or stay on `4.8.11` |
 | Beta builds | Use `EmbyRefMode=local` against the installed assemblies |
 
-Emby is more forgiving about this than Jellyfin. A plugin built against 4.8 generally loads on a 4.9
-server, whereas a Jellyfin plugin whose `Jellyfin.Controller` version does not match the server is
-rejected outright as `NotSupported`. Building against a *newer* package than your server still breaks,
-so when in doubt, build low.
+Both `4.8.11` and `4.9.1.90` are known to compile.
+
+Emby is more forgiving about version matching than Jellyfin. A plugin built against 4.8 generally
+loads on a 4.9 server, whereas a Jellyfin plugin whose `Jellyfin.Controller` version does not match
+the server is rejected outright as `NotSupported`. Building against a *newer* package than your
+server still breaks, so when in doubt, build low.
+
+The project also references `System.Memory` at compile time only. Emby's `ILogger` publishes a
+`ReadOnlyMemory<char>` overload of every log method, and without that reference the compiler cannot
+resolve *any* call to `Info`/`Warn`/`Error`. If you pin a newer `EmbyApiVersion` and hit CS1705,
+raise it: `-p:SystemMemoryVersion=4.6.0`.
 
 ## Installing
 
@@ -81,19 +143,7 @@ Then configure at **Dashboard → Plugins → Auto Tagger**.
 
 There is no Emby equivalent of the jprm + GitHub Pages workflow used for the Jellyfin build. Emby has
 no support for third-party plugin repositories: its catalog is curated by the Emby team and populated
-by submission. For personal use, distribute the DLL directly — the included GitHub Actions workflow
-builds it on every push and attaches it as an artifact.
-
-## How it works
-
-- `AutoTagEntryPoint` is an `IServerEntryPoint` subscribed to `ILibraryManager.ItemAdded`. Emby
-  discovers it automatically; there is nothing to register.
-- `Tagger` resolves an item's libraries via `ILibraryManager.GetCollectionFolders`, unions the tags
-  from every matching rule, and writes with `UpdateToRepository`.
-- `ApplyTagsTask` is a manual scheduled task that backfills existing items.
-- Library matching tries the stored id against both the internal row id and the GUID, then falls back
-  to the library name. This is deliberate defensiveness about how Emby identifies libraries — see the
-  porting notes.
+by submission. For personal use, distribute the DLL directly.
 
 ## Things to verify on your server
 
@@ -101,10 +151,6 @@ builds it on every push and attaches it as an artifact.
 case and is worth testing directly rather than assuming: tag a series, log in as a restricted user,
 and check whether individual episodes are hidden. If they are not, enable **Also tag seasons and
 episodes** — but that writes one row per episode.
-
-**Metadata refresh behaviour.** *Lock the Tags field* is on by default, because a refresh with
-"replace existing metadata" can otherwise clear the Tags field. If you would rather manage tags by
-hand later, turn it off — a locked field cannot be edited from the UI until it is unlocked.
 
 **`ItemAdded` timing.** As on Jellyfin, tags can take a while to appear in the UI after an item is
 added. On the Jellyfin build this looked like a bug and turned out to be latency. Check the server log

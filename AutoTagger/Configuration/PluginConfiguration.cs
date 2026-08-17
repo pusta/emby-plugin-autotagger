@@ -15,7 +15,7 @@ namespace AutoTagger.Configuration
         {
             Rules = new LibraryTagRule[0];
             TagEpisodesAndSeasons = false;
-            LockTags = true;
+            LockTags = false;
         }
 
         /// <summary>
@@ -30,10 +30,18 @@ namespace AutoTagger.Configuration
         public bool TagEpisodesAndSeasons { get; set; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether the Tags field is locked after writing, so that a
-        /// metadata refresh with "replace existing metadata" cannot clear it. A locked field cannot
-        /// be edited from the web UI until it is unlocked.
+        /// Gets or sets a value indicating whether the Tags field is locked after tagging, so that a
+        /// metadata refresh with "replace existing metadata" cannot clear it. Off by default: a
+        /// locked field is skipped entirely by the metadata providers, so the item keeps the
+        /// configured tags and gains no others, and it cannot be edited from the web UI until it is
+        /// unlocked. Leaving it off is safe because the configured tags are re-applied after any
+        /// refresh that replaces them — see <c>AutoTagEntryPoint.OnItemUpdated</c>.
         /// </summary>
+        /// <remarks>
+        /// The lock is only ever taken once the metadata providers have finished with an item.
+        /// Taking it on the ItemAdded path would pre-empt the first refresh and cost the item every
+        /// tag its metadata source would have supplied.
+        /// </remarks>
         public bool LockTags { get; set; }
     }
 }

@@ -13,7 +13,8 @@ using MediaBrowser.Model.Tasks;
 namespace AutoTagger.ScheduledTasks
 {
     /// <summary>
-    /// Applies configured tags to items that are already in a watched library.
+    /// The ItemAdded hook only catches new arrivals. Run this task once after configuring rules to
+    /// tag everything already present in the watched libraries.
     /// </summary>
     /// <remarks>
     /// Emby's IScheduledTask differs from Jellyfin's in two ways that matter: the execute method is
@@ -48,19 +49,19 @@ namespace AutoTagger.ScheduledTasks
         /// <inheritdoc />
         public string Key
         {
-            get { return "AutoTaggerApplyTags"; }
+            get { return "AutoTaggerApplyExisting"; }
         }
 
         /// <inheritdoc />
         public string Description
         {
-            get { return "Applies the tags configured in Auto Tagger to items already present in each watched library."; }
+            get { return "Tags items already present in the watched libraries."; }
         }
 
         /// <inheritdoc />
         public string Category
         {
-            get { return "Library"; }
+            get { return "Auto Tagger"; }
         }
 
         /// <inheritdoc />
@@ -91,26 +92,29 @@ namespace AutoTagger.ScheduledTasks
                 return Task.FromResult(true);
             }
 
+            var types = Tagger.GetTaggableTypeNames(configuration);
             var tagged = 0;
             var examined = 0;
-            var folderIndex = 0;
 
-            foreach (var folder in watched)
+            for (var folderIndex = 0; folderIndex < watched.Count; folderIndex++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                var folder = watched[folderIndex];
 
                 var items = _libraryManager.GetItemList(new InternalItemsQuery
                 {
                     Parent = folder,
                     Recursive = true,
-                    IsVirtualItem = false
+                    IsVirtualItem = false,
+                    IncludeItemTypes = types
                 });
 
-                var itemList = items == null ? new List<BaseItem>() : items.ToList();
+                var itemList = items ?? new BaseItem[0];
 
-                _logger.Info("Auto Tagger scanning {0} ({1} items)", folder.Name, itemList.Count);
+                _logger.Info("Auto Tagger scanning {0} ({1} items)", folder.Name, itemList.Length);
 
-                for (var i = 0; i < itemList.Count; i++)
+                for (var i = 0; i < itemList.Length; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
@@ -118,7 +122,10 @@ namespace AutoTagger.ScheduledTasks
 
                     try
                     {
-                        if (_tagger.TagItem(itemList[i]))
+                        // These items are already in the library, so their metadata has been
+                        // fetched and locking the Tags field costs nothing the providers were
+                        // going to add.
+                        if (_tagger.Apply(itemList[i], true))
                         {
                             tagged++;
                         }
@@ -128,15 +135,12 @@ namespace AutoTagger.ScheduledTasks
                         _logger.ErrorException("Failed to tag {0}", ex, itemList[i].Name);
                     }
 
-                    if (itemList.Count > 0)
-                    {
-                        var withinFolder = (double)(i + 1) / itemList.Count;
-                        progress.Report(100 * (folderIndex + withinFolder) / watched.Count);
-                    }
+                    // Progress is reported per-library so one big library does not stall the bar.
+                    var withinFolder = itemList.Length == 0 ? 1d : (double)(i + 1) / itemList.Length;
+                    progress.Report(100 * (folderIndex + withinFolder) / watched.Count);
                 }
 
-                folderIndex++;
-                progress.Report(100 * (double)folderIndex / watched.Count);
+                progress.Report(100 * (double)(folderIndex + 1) / watched.Count);
             }
 
             _logger.Info("Auto Tagger examined {0} items and updated {1}", examined, tagged);
@@ -150,25 +154,102 @@ namespace AutoTagger.ScheduledTasks
         /// </summary>
         /// <param name="configuration">The plugin configuration.</param>
         /// <returns>The matching collection folders.</returns>
+        /// <remarks>
+        /// Jellyfin can query each library directly by its GUID, because that is what the rule
+        /// stores. Emby's rules may hold either id form or only a name, so the libraries are
+        /// enumerated and matched with the same <c>Tagger.MatchesLibrary</c> the live handler uses,
+        /// which keeps the two from ever disagreeing about which rule covers which library.
+        /// </remarks>
         private List<Folder> GetWatchedFolders(PluginConfiguration configuration)
         {
-            // The user root folder's children are the libraries, which is how Emby itself
-            // enumerates collection folders internally.
-            var root = _libraryManager.GetUserRootFolder();
-
-            if (root == null)
-            {
-                return new List<Folder>();
-            }
-
-            return root.Children
-                .OfType<Folder>()
+            return GetLibraryFolders()
                 .Where(folder => configuration.Rules.Any(rule =>
                     rule != null
                     && rule.Tags != null
                     && rule.Tags.Length > 0
                     && Tagger.MatchesLibrary(folder, rule)))
                 .ToList();
+        }
+
+        /// <summary>
+        /// Enumerates the server's libraries as folder items.
+        /// </summary>
+        /// <returns>The collection folders.</returns>
+        /// <remarks>
+        /// The user root folder's children are the libraries. Emby's Folder does not expose a
+        /// Children property, so they are queried; if that comes back empty the virtual folder list
+        /// is used instead and each entry resolved by id, which is the same list the configuration
+        /// page is built from.
+        /// </remarks>
+        private List<Folder> GetLibraryFolders()
+        {
+            var root = _libraryManager.GetUserRootFolder();
+
+            if (root != null)
+            {
+                var children = _libraryManager.GetItemList(new InternalItemsQuery { Parent = root });
+
+                if (children != null)
+                {
+                    var folders = children.OfType<Folder>().ToList();
+                    if (folders.Count > 0)
+                    {
+                        return folders;
+                    }
+                }
+            }
+
+            return GetLibraryFoldersFromVirtualFolders();
+        }
+
+        /// <summary>
+        /// Resolves the libraries from <c>ILibraryManager.GetVirtualFolders</c>.
+        /// </summary>
+        /// <returns>The collection folders that could be resolved.</returns>
+        private List<Folder> GetLibraryFoldersFromVirtualFolders()
+        {
+            var resolved = new List<Folder>();
+            var virtualFolders = _libraryManager.GetVirtualFolders();
+
+            if (virtualFolders == null)
+            {
+                return resolved;
+            }
+
+            foreach (var virtualFolder in virtualFolders)
+            {
+                BaseItem item = null;
+
+                long internalId;
+                Guid guid;
+
+                // GetItemById throws on an empty GUID rather than returning null, so every id is
+                // checked before it is used.
+                if (!string.IsNullOrEmpty(virtualFolder.ItemId) && long.TryParse(virtualFolder.ItemId, out internalId) && internalId > 0)
+                {
+                    item = _libraryManager.GetItemById(internalId);
+                }
+                else if (!string.IsNullOrEmpty(virtualFolder.ItemId) && Guid.TryParse(virtualFolder.ItemId, out guid) && !guid.Equals(Guid.Empty))
+                {
+                    item = _libraryManager.GetItemById(guid);
+                }
+                else if (!string.IsNullOrEmpty(virtualFolder.Guid) && Guid.TryParse(virtualFolder.Guid, out guid) && !guid.Equals(Guid.Empty))
+                {
+                    item = _libraryManager.GetItemById(guid);
+                }
+
+                var folder = item as Folder;
+                if (folder != null)
+                {
+                    resolved.Add(folder);
+                }
+                else
+                {
+                    _logger.Warn("Auto Tagger could not resolve library {0} (id {1})", virtualFolder.Name, virtualFolder.ItemId);
+                }
+            }
+
+            return resolved;
         }
     }
 }

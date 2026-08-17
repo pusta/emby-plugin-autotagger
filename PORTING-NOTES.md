@@ -1,24 +1,32 @@
 # Jellyfin → Emby porting notes
 
-What changed between `jellyfin-plugin-autotagger` and this project, and what to check first when it
-does not compile.
+What differs between `jellyfin-plugin-autotagger` and this project, and why.
 
-## Verify these first
+## API surface: verified
 
-Ranked by how likely each is to need a fix. Every one is a single line in a single place.
+Everything below was checked against the real `MediaBrowser.Server.Core` assemblies (4.8.11 and
+4.9.1.90). The project compiles clean against both. Kept as a record of the calls that were in doubt
+during the port, since they are the ones most likely to move in a future Emby release.
 
-| # | Call | Where | Risk | If it fails |
-| --- | --- | --- | --- | --- |
-| 1 | `MetadataFields.Tags` | `Tagger.TagItem` | Medium | Emby's enum is `MetadataFields` (plural); Jellyfin renamed it to `MetadataField`. If the compiler cannot find it, try the singular, or drop the locking feature by unchecking *Lock the Tags field*. |
-| 2 | `item.UpdateToRepository(ItemUpdateType.MetadataEdit)` | `Tagger.SaveItem` | Medium | Emby publishes several overloads. Alternatives are named in the method's own doc comment: add a `BaseItem parent` argument, or call `_libraryManager.UpdateItem(item, item.GetParent(), ItemUpdateType.MetadataEdit)`. This is the only write call in the project, on purpose. |
-| 3 | `folder.InternalId` | `Tagger.MatchesLibrary` | Medium | If `InternalId` is not exposed on your build, delete that clause. The GUID comparison and the name fallback still work. |
-| 4 | `IServerEntryPoint.Run()` returning `void` | `AutoTagEntryPoint` | Low-medium | Some Emby builds expose `Task RunAsync()` instead. Change the signature and return `Task.FromResult(true)`. |
-| 5 | `InternalItemsQuery.Parent` | `ApplyTagsTask.Execute` | Low | If absent, use `ParentIds` or `AncestorIds` with the folder's id. |
-| 6 | `ApiClient.getVirtualFolders()` | `configPage.html` | Low | Already has a fallback to `Library/VirtualFolders` via `getJSON`. If both fail, check the browser console. |
+| Call | Where | Status |
+| --- | --- | --- |
+| `MetadataFields.Tags` | `Tagger.Apply` | Present. Emby's enum is `MetadataFields` (plural); Jellyfin renamed it to `MetadataField`. |
+| `item.UpdateToRepository(ItemUpdateType.MetadataEdit)` | `Tagger.SaveItem` | Present, along with three other overloads named in the method's doc comment. This is the only write call in the project, on purpose. |
+| `folder.InternalId` | `Tagger.MatchesLibrary` | Present, `long`. The GUID and name comparisons are still checked alongside it. |
+| `IServerEntryPoint.Run()` returning `void` | `AutoTagEntryPoint` | Correct — the interface declares exactly `void Run()`. |
+| `InternalItemsQuery.Parent` | `ApplyTagsTask` | Present, and not a plain property: its setter assigns `ParentIds` from the folder's internal id, so `Parent` + `Recursive` really does scope the query to one library. |
+| `ILibraryManager.ItemUpdated` | `AutoTagEntryPoint` | Present, with `ItemChangeEventArgs.UpdateReason` carrying the `ItemUpdateType`. |
+| `ApiClient.getVirtualFolders()` | `configPage.html` | Not verifiable from a build. Falls back to `Library/VirtualFolders` via `getJSON`; if both fail, check the browser console. |
 
-If the library list loads but nothing ever gets tagged, the likeliest cause is #3 — a rule storing an
-id in a form that never matches. The name fallback should cover it; if the library was renamed after
-the rule was saved, re-save the configuration page.
+One compile-time dependency is not obvious: Emby's `ILogger` publishes a `ReadOnlyMemory<char>`
+overload of every log method, which on `netstandard2.0` lives in `System.Memory`. Without that
+package reference the compiler cannot resolve *any* call to `Info`/`Warn`/`Error`, not only the ones
+that would bind to it. The reference is compile-time only (`ExcludeAssets="runtime"`); the server
+supplies the assembly.
+
+If the library list loads but nothing ever gets tagged, the likeliest cause is a rule storing a
+library id in a form that never matches. The name fallback should cover it; if the library was
+renamed after the rule was saved, re-save the configuration page.
 
 ## Structural changes
 
@@ -112,7 +120,7 @@ configuration file name and cannot be changed afterwards without orphaning the s
 | `build.yaml` | jprm's manifest and single source of truth for version and metadata. Emby has no packaging manifest; version lives in the csproj. |
 | `jellyfin.ruleset` | StyleCop ruleset from the Jellyfin template. |
 | `PluginServiceRegistrator.cs` | No DI registration hook on Emby. |
-| The eight template workflows | Replaced by one `build.yml`. The Jellyfin template's workflows were built around jprm packaging and repository publishing, neither of which applies. |
+| The eight template workflows | Dropped entirely — there is no CI in this repository. The Jellyfin template's workflows were built around jprm packaging and repository publishing, neither of which applies, and Emby has no third-party plugin repository to publish to. |
 | `artifacts/` | jprm's output directory, which had to be created by hand before building. |
 
 ### Analyzer and style settings
@@ -123,6 +131,57 @@ that carries over — Emby has no template and no house style, and enabling thos
 non-annotated closed-source API surface produces noise rather than signal. XML documentation comments
 were kept anyway, because they are genuinely useful here for recording *why* a call is written the way
 it is.
+
+### Tag merge semantics: the one behavioural difference
+
+This is the only place where the same configuration produces genuinely different behaviour on the
+two servers, and it is the server's doing, not the plugin's.
+
+Jellyfin unions provider tags with the ones already on the item. Emby's `MergeBaseItemData` does not:
+
+```csharp
+if (!lockedFields.Contains(MetadataFields.Tags))
+{
+    if (replaceData || target.Tags.Length == 0)
+    {
+        target.Tags = source.Tags;
+    }
+}
+```
+
+So on Emby a refresh either replaces the tag set wholesale (`replaceData`, i.e. "replace all
+metadata") or writes provider tags only when the item has none at all. Two consequences:
+
+1. A replace-all refresh discards the configured tags. The `ItemUpdated` handler is what puts them
+   back, and without it tagging would silently come undone. On Jellyfin that handler is a
+   nice-to-have; here it is load-bearing.
+2. Because the plugin tags an item at `ItemAdded` — before its first refresh — the item usually has
+   a non-empty tag set by the time the providers merge, so an ordinary refresh will not add provider
+   tags even with the field unlocked. The **Lock the Tags field** option therefore costs less on
+   Emby than on Jellyfin, but it still blocks hand-editing tags in the web UI, so it stays off by
+   default for parity.
+
+### Event handling and the ordering hazard
+
+`AutoTagEntryPoint` mirrors the Jellyfin build's two-event design (`ItemAdded` for arrival,
+`ItemUpdated` for after the providers have run, locking only ever on the latter). Three details are
+Emby-specific:
+
+- **Re-entrancy.** Emby raises `ItemUpdated` from inside `LibraryManager.UpdateItems`, synchronously,
+  once per item in the batch. The plugin's own write goes through the same path with
+  `ItemUpdateType.MetadataEdit`, which the handler's reason mask excludes — that mask is what stops
+  the handler from calling itself forever, exactly as on Jellyfin.
+- **Threading.** Both events are raised in-line on the scan thread. The work is pushed onto the
+  thread pool, which also gets the write out from under the `UpdateItems` call that raised the event.
+- **`Task.Run` without `await`.** Jellyfin's handler discards the task with `_ = Task.Run(...)`;
+  the same is done here, and the lambda is synchronous because Emby's write API is.
+
+### Exclusion tags
+
+`LibraryTagRule.ExcludeTags` behaves identically on both platforms. The only Emby-specific concern is
+that `XmlSerializer` does not run the constructor's initializer for a field that is absent from an
+existing configuration file, so a rule saved by an earlier build deserializes with `ExcludeTags`
+null. Every read of it is null-tolerant.
 
 ## What did not change
 
