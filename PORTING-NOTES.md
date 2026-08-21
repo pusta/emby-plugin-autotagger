@@ -1,24 +1,32 @@
 # Jellyfin → Emby porting notes
 
-What changed between `jellyfin-plugin-autotagger` and this project, and what to check first when it
-does not compile.
+What differs between `jellyfin-plugin-autotagger` and this project, and why.
 
-## Verify these first
+## API surface: verified
 
-Ranked by how likely each is to need a fix. Every one is a single line in a single place.
+Everything below was checked against the real `MediaBrowser.Server.Core` assemblies (4.8.11 and
+4.9.1.90). The project compiles clean against both. Kept as a record of the calls that were in doubt
+during the port, since they are the ones most likely to move in a future Emby release.
 
-| # | Call | Where | Risk | If it fails |
-| --- | --- | --- | --- | --- |
-| 1 | `MetadataFields.Tags` | `Tagger.TagItem` | Medium | Emby's enum is `MetadataFields` (plural); Jellyfin renamed it to `MetadataField`. If the compiler cannot find it, try the singular, or drop the locking feature by unchecking *Lock the Tags field*. |
-| 2 | `item.UpdateToRepository(ItemUpdateType.MetadataEdit)` | `Tagger.SaveItem` | Medium | Emby publishes several overloads. Alternatives are named in the method's own doc comment: add a `BaseItem parent` argument, or call `_libraryManager.UpdateItem(item, item.GetParent(), ItemUpdateType.MetadataEdit)`. This is the only write call in the project, on purpose. |
-| 3 | `folder.InternalId` | `Tagger.MatchesLibrary` | Medium | If `InternalId` is not exposed on your build, delete that clause. The GUID comparison and the name fallback still work. |
-| 4 | `IServerEntryPoint.Run()` returning `void` | `AutoTagEntryPoint` | Low-medium | Some Emby builds expose `Task RunAsync()` instead. Change the signature and return `Task.FromResult(true)`. |
-| 5 | `InternalItemsQuery.Parent` | `ApplyTagsTask.Execute` | Low | If absent, use `ParentIds` or `AncestorIds` with the folder's id. |
-| 6 | `ApiClient.getVirtualFolders()` | `configPage.html` | Low | Already has a fallback to `Library/VirtualFolders` via `getJSON`. If both fail, check the browser console. |
+| Call | Where | Status |
+| --- | --- | --- |
+| `MetadataFields.Tags` | `Tagger.Apply` | Present. Emby's enum is `MetadataFields` (plural); Jellyfin renamed it to `MetadataField`. |
+| `item.UpdateToRepository(ItemUpdateType.MetadataEdit)` | `Tagger.SaveItem` | Present, along with three other overloads named in the method's doc comment. This is the only write call in the project, on purpose. |
+| `folder.InternalId` | `Tagger.MatchesLibrary` | Present, `long`. The GUID and name comparisons are still checked alongside it. |
+| `IServerEntryPoint.Run()` returning `void` | `AutoTagEntryPoint` | Correct — the interface declares exactly `void Run()`. |
+| `InternalItemsQuery.Parent` | `ApplyTagsTask` | Present, and not a plain property: its setter assigns `ParentIds` from the folder's internal id, so `Parent` + `Recursive` really does scope the query to one library. |
+| `ILibraryManager.ItemUpdated` | `AutoTagEntryPoint` | Present, with `ItemChangeEventArgs.UpdateReason` carrying the `ItemUpdateType`. |
+| `ApiClient.getVirtualFolders()` | `configPage.html` | Not verifiable from a build. Falls back to `Library/VirtualFolders` via `getJSON`; if both fail, check the browser console. |
 
-If the library list loads but nothing ever gets tagged, the likeliest cause is #3 — a rule storing an
-id in a form that never matches. The name fallback should cover it; if the library was renamed after
-the rule was saved, re-save the configuration page.
+One compile-time dependency is not obvious: Emby's `ILogger` publishes a `ReadOnlyMemory<char>`
+overload of every log method, which on `netstandard2.0` lives in `System.Memory`. Without that
+package reference the compiler cannot resolve *any* call to `Info`/`Warn`/`Error`, not only the ones
+that would bind to it. The reference is compile-time only (`ExcludeAssets="runtime"`); the server
+supplies the assembly.
+
+If the library list loads but nothing ever gets tagged, the likeliest cause is a rule storing a
+library id in a form that never matches. The name fallback should cover it; if the library was
+renamed after the rule was saved, re-save the configuration page.
 
 ## Structural changes
 
@@ -75,18 +83,82 @@ Emby's `IScheduledTask` differs from Jellyfin's in three ways:
 Both the name and the argument order of the execute method changed, so this will not compile by
 accident — which is the good outcome.
 
-### Configuration page
+### Settings page: no HTML at all
 
-Same general shape — an embedded HTML resource resolved by
-`"<RootNamespace>.Configuration.configPage.html"` — but the wrapper markup differs. Emby pages are a
-full HTML document with a `data-role="page"` div carrying
-`class="page type-interior pluginConfigurationPage"` and a `data-require` attribute listing the Emby
-web components used (`emby-input`, `emby-button`, `emby-checkbox`). The `ApiClient` and `Dashboard`
-globals are broadly the same, and jQuery is available in Emby's dashboard, though this page uses
-vanilla DOM APIs so it does not depend on that.
+The largest difference, and the one that took three attempts to get right. Jellyfin serves a
+configuration page as an HTML document with an inline `<script>`. **Do not port that page to Emby.**
+On Emby 4.9 a hand-written page renders behind the dashboard and garbled, and its script never runs.
 
-`load()` is called both from the `pageshow` event and directly, because depending on how Emby injects
-the page the event may already have fired before the inline script runs.
+Emby generates the settings UI from a C# class instead:
+
+| | Jellyfin | Emby |
+| --- | --- | --- |
+| Plugin base | `BasePlugin<PluginConfiguration>` + `IHasWebPages` | `BasePluginSimpleUI<PluginOptions>` |
+| Settings model | `BasePluginConfiguration` | `EditableOptionsBase` |
+| UI | `configPage.html`, hand-written | Generated by the server from the model's properties |
+| Labels | HTML | `[DisplayName]` / `[Description]` |
+| Hiding a field | omit it from the HTML | `[Browsable(false)]` |
+| Repeating rows | markup built in JS | `EditableObjectCollection` of child objects |
+| Populate before display | `pageshow` handler | `OnBeforeShowUI(options)` |
+| Intercept a save | form submit handler | `OnOptionsSaving(options)` |
+| Config access elsewhere | `Plugin.Instance.Configuration` | `GetOptions()`, wrapped here as a public `Configuration` property |
+
+What was tried first, so it is not tried again:
+
+1. **Full HTML document with `data-role="page"` and an inline script** — the pre-4.x style. Renders
+   behind the current page and garbled on 4.9. Note that plenty of third-party plugins still ship
+   this and appear to work on older servers, so copying an arbitrary plugin is not safe.
+2. **Fragment with `is="emby-scroller"` and `data-controller="__plugin/<name>"`, script in a second
+   embedded resource** — the style Emby's own [Anime plugin](https://github.com/MediaBrowser/Emby.Plugins.Anime/tree/master/MediaBrowser.Plugins.Anime/Configuration)
+   uses. Also failed on 4.9, with the same symptoms.
+3. **`BasePluginSimpleUI`** — what the project uses now, and what
+   [Emby's own documentation](https://dev.emby.media/doc/plugins/ui/index.html) recommends, in as
+   many words: custom pages "got broken quite too often, either visually or sometimes even
+   functionally due to breaking changes in Emby Server".
+
+The working reference for the declarative route is [StrmAssistant](https://github.com/sjtuross/StrmAssistant/tree/HEAD/StrmAssistant/Options),
+a current plugin that uses it against 4.8 and 4.9.
+
+#### Do not use `EditableObjectCollection` for a repeating list
+
+Emby's documentation points at `EditableObjectCollection` for "a dynamic number of child options",
+and it renders correctly — but nothing can read it back. It is a `List<EditableObjectBase>`, and
+`EditableObjectBase` is abstract, so the serializer has no concrete type to construct:
+
+```
+NotSupportedException: Deserialization of interface or abstract types is not supported.
+Type 'Emby.Web.GenericEdit.EditableObjectBase'. Path: $.LibraryRules[0]
+```
+
+That matters because the whole options object is round-tripped through JSON twice: the settings page
+posts it back to `EditableObjectBase.DeserializeFromJsonString`, and the options store reloads it at
+start-up through `DeserializeFromJsonStream`. Both do
+`serializer.DeserializeFromString(json, GetType()) as IEditableObject` — and when the deserialize
+fails, the `as` produces null, which the caller dereferences. In the dashboard that surfaces as
+**"Object reference not set to an instance of an object"** when you press Save. Neither method is
+virtual in any useful sense (they satisfy an interface and cannot be overridden), so the fix has to
+be in the shape of the data rather than in a hook.
+
+`LibraryRuleRowCollection` is that fix: it derives from `List<LibraryRuleRow>` — a concrete element
+type the serializer can construct — and implements `IEditableObjectCollection`, which asks only for
+`IEnumerable<IEditableObject>`. The editor renders it identically, because that interface is what the
+editor builder keys on.
+
+One wrinkle to know about: the collection then implements `IEnumerable<T>` twice, so LINQ over it
+needs the element type pinned (`RuleRows.ToRules` takes `IEnumerable<LibraryRuleRow>`, which resolves
+it at the call site).
+
+Two consequences worth knowing:
+
+- **The rows are display state, not storage.** `PluginOptions.Rules` — a plain `LibraryTagRule[]`,
+  `[Browsable(false)]` — is what the tagger reads. `OnBeforeShowUI` builds one row per library from
+  it, and `OnOptionsSaving` folds the edited rows back. Storing the plain array rather than the
+  collection keeps the plugin's actual data independent of how the edit framework round-trips the
+  editor surface, and lets `RuleRows` be tested without a server. If a save ever arrives with no
+  rows at all, `OnOptionsSaving` keeps the stored rules and logs an error rather than wiping them.
+- **Settings do not migrate.** `BasePluginSimpleUI` persists through its own options store, not as
+  the `AutoTagger.xml` that `BasePlugin<TConfiguration>` wrote. Anything saved by an earlier build
+  of this plugin has to be entered again.
 
 ### Plugin icon
 
@@ -112,7 +184,7 @@ configuration file name and cannot be changed afterwards without orphaning the s
 | `build.yaml` | jprm's manifest and single source of truth for version and metadata. Emby has no packaging manifest; version lives in the csproj. |
 | `jellyfin.ruleset` | StyleCop ruleset from the Jellyfin template. |
 | `PluginServiceRegistrator.cs` | No DI registration hook on Emby. |
-| The eight template workflows | Replaced by one `build.yml`. The Jellyfin template's workflows were built around jprm packaging and repository publishing, neither of which applies. |
+| The eight template workflows | Dropped entirely — there is no CI in this repository. The Jellyfin template's workflows were built around jprm packaging and repository publishing, neither of which applies, and Emby has no third-party plugin repository to publish to. |
 | `artifacts/` | jprm's output directory, which had to be created by hand before building. |
 
 ### Analyzer and style settings
@@ -123,6 +195,57 @@ that carries over — Emby has no template and no house style, and enabling thos
 non-annotated closed-source API surface produces noise rather than signal. XML documentation comments
 were kept anyway, because they are genuinely useful here for recording *why* a call is written the way
 it is.
+
+### Tag merge semantics: the one behavioural difference
+
+This is the only place where the same configuration produces genuinely different behaviour on the
+two servers, and it is the server's doing, not the plugin's.
+
+Jellyfin unions provider tags with the ones already on the item. Emby's `MergeBaseItemData` does not:
+
+```csharp
+if (!lockedFields.Contains(MetadataFields.Tags))
+{
+    if (replaceData || target.Tags.Length == 0)
+    {
+        target.Tags = source.Tags;
+    }
+}
+```
+
+So on Emby a refresh either replaces the tag set wholesale (`replaceData`, i.e. "replace all
+metadata") or writes provider tags only when the item has none at all. Two consequences:
+
+1. A replace-all refresh discards the configured tags. The `ItemUpdated` handler is what puts them
+   back, and without it tagging would silently come undone. On Jellyfin that handler is a
+   nice-to-have; here it is load-bearing.
+2. Because the plugin tags an item at `ItemAdded` — before its first refresh — the item usually has
+   a non-empty tag set by the time the providers merge, so an ordinary refresh will not add provider
+   tags even with the field unlocked. The **Lock the Tags field** option therefore costs less on
+   Emby than on Jellyfin, but it still blocks hand-editing tags in the web UI, so it stays off by
+   default for parity.
+
+### Event handling and the ordering hazard
+
+`AutoTagEntryPoint` mirrors the Jellyfin build's two-event design (`ItemAdded` for arrival,
+`ItemUpdated` for after the providers have run, locking only ever on the latter). Three details are
+Emby-specific:
+
+- **Re-entrancy.** Emby raises `ItemUpdated` from inside `LibraryManager.UpdateItems`, synchronously,
+  once per item in the batch. The plugin's own write goes through the same path with
+  `ItemUpdateType.MetadataEdit`, which the handler's reason mask excludes — that mask is what stops
+  the handler from calling itself forever, exactly as on Jellyfin.
+- **Threading.** Both events are raised in-line on the scan thread. The work is pushed onto the
+  thread pool, which also gets the write out from under the `UpdateItems` call that raised the event.
+- **`Task.Run` without `await`.** Jellyfin's handler discards the task with `_ = Task.Run(...)`;
+  the same is done here, and the lambda is synchronous because Emby's write API is.
+
+### Exclusion tags
+
+`LibraryTagRule.ExcludeTags` behaves identically on both platforms. The only Emby-specific concern is
+that `XmlSerializer` does not run the constructor's initializer for a field that is absent from an
+existing configuration file, so a rule saved by an earlier build deserializes with `ExcludeTags`
+null. Every read of it is null-tolerant.
 
 ## What did not change
 

@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using AutoTagger.Configuration;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Entities;
@@ -37,7 +38,7 @@ namespace AutoTagger.Services
             _logger = logManager.GetLogger("AutoTagger");
         }
 
-        private static PluginConfiguration Configuration
+        private static PluginOptions Configuration
         {
             get
             {
@@ -47,43 +48,71 @@ namespace AutoTagger.Services
         }
 
         /// <summary>
-        /// Determines whether an item is a candidate for tagging at all, independent of whether any
-        /// rule matches it. Used by both the live event handler and the backfill task so the two
-        /// always agree on scope.
+        /// Determines whether an item is eligible for tagging at all, independent of whether any
+        /// rule matches it. Movies and series always qualify; seasons and episodes are opt-in
+        /// because tagging every episode of a large series is a lot of database writes.
         /// </summary>
         /// <param name="item">The item to test.</param>
+        /// <param name="configuration">The current plugin configuration.</param>
         /// <returns><c>true</c> if the item should be considered for tagging.</returns>
-        public static bool IsTaggable(BaseItem item)
+        /// <remarks>
+        /// This is a whitelist rather than a blacklist, matching the Jellyfin build. Anything that
+        /// is not one of the four types below — library roots, views, collections, music, photos,
+        /// live TV — is never written to, so the plugin cannot damage item types it was never
+        /// meant to touch. Missing/unaired placeholder entries are excluded as well: they have no
+        /// file behind them and Emby recreates them on the next scan.
+        /// </remarks>
+        public static bool IsTaggable(BaseItem item, PluginOptions configuration)
         {
-            if (item == null)
+            if (item == null || configuration == null)
             {
                 return false;
             }
 
-            // Library roots and dashboard views are not real media and must never be written to.
-            if (item is ICollectionFolder || item is UserView || item is AggregateFolder)
+            if (item.IsVirtualItem || item.LocationType == LocationType.Virtual)
             {
                 return false;
             }
 
-            // Missing/unaired placeholder entries.
-            if (item.LocationType == LocationType.Virtual)
+            if (item is Movie || item is Series)
             {
-                return false;
+                return true;
             }
 
-            var configuration = Configuration;
-            if (configuration == null)
+            if (item is Season || item is Episode)
             {
-                return false;
+                return configuration.TagEpisodesAndSeasons;
             }
 
-            if ((item is Season || item is Episode) && !configuration.TagEpisodesAndSeasons)
+            return false;
+        }
+
+        /// <summary>
+        /// Gets the item type names to include in a library query, matching what
+        /// <see cref="IsTaggable"/> accepts.
+        /// </summary>
+        /// <param name="configuration">The current plugin configuration.</param>
+        /// <returns>Type names for <c>InternalItemsQuery.IncludeItemTypes</c>.</returns>
+        /// <remarks>
+        /// Emby's query takes type names as strings, where Jellyfin's takes a BaseItemKind enum.
+        /// The names are taken from the types themselves so a rename cannot silently produce a
+        /// query that matches nothing.
+        /// </remarks>
+        public static string[] GetTaggableTypeNames(PluginOptions configuration)
+        {
+            var names = new List<string>
             {
-                return false;
+                typeof(Movie).Name,
+                typeof(Series).Name
+            };
+
+            if (configuration != null && configuration.TagEpisodesAndSeasons)
+            {
+                names.Add(typeof(Season).Name);
+                names.Add(typeof(Episode).Name);
             }
 
-            return true;
+            return names.ToArray();
         }
 
         /// <summary>
@@ -97,6 +126,8 @@ namespace AutoTagger.Services
         /// in-process object model also carries a <c>Guid</c> id. Both forms are compared so the
         /// stored configuration works whichever one the dashboard handed us, and the library name is
         /// used as a last resort — Emby requires library names to be unique, so it is a safe key.
+        /// The Jellyfin build can simply parse the stored id as a GUID; this is the one place where
+        /// the two implementations genuinely cannot share logic.
         /// </remarks>
         public static bool MatchesLibrary(Folder folder, LibraryTagRule rule)
         {
@@ -121,10 +152,14 @@ namespace AutoTagger.Services
 
         /// <summary>
         /// Gets the union of tags configured for every library that contains the item.
+        /// An item present in two watched libraries receives the union of both rule sets.
+        /// A rule whose exclusions match one of the item's existing tags contributes nothing;
+        /// the other libraries' rules still apply.
         /// </summary>
         /// <param name="item">The item.</param>
+        /// <param name="existingTags">The tags the item already carries, used to evaluate exclusions.</param>
         /// <returns>The tags to apply. Empty if no rule matches.</returns>
-        public string[] GetTagsForItem(BaseItem item)
+        public string[] GetConfiguredTags(BaseItem item, string[] existingTags)
         {
             var configuration = Configuration;
             if (item == null || configuration == null || configuration.Rules == null || configuration.Rules.Length == 0)
@@ -133,7 +168,7 @@ namespace AutoTagger.Services
             }
 
             var folders = _libraryManager.GetCollectionFolders(item);
-            if (folders == null || folders.Count == 0)
+            if (folders == null || folders.Length == 0)
             {
                 return new string[0];
             }
@@ -150,6 +185,11 @@ namespace AutoTagger.Services
                     }
 
                     if (!MatchesLibrary(folder, rule))
+                    {
+                        continue;
+                    }
+
+                    if (IsExcluded(rule, existingTags))
                     {
                         continue;
                     }
@@ -174,31 +214,65 @@ namespace AutoTagger.Services
         }
 
         /// <summary>
-        /// Applies any missing configured tags to the item and saves it.
+        /// Tests whether an item's existing tags suppress a rule. An empty exclusion list
+        /// never suppresses.
         /// </summary>
-        /// <param name="item">The item to tag.</param>
-        /// <returns><c>true</c> if the item was written to the repository.</returns>
-        public bool TagItem(BaseItem item)
+        /// <param name="rule">The rule to test.</param>
+        /// <param name="existingTags">The tags the item already carries.</param>
+        /// <returns><c>true</c> if the rule should be skipped for this item.</returns>
+        private static bool IsExcluded(LibraryTagRule rule, string[] existingTags)
         {
-            if (!IsTaggable(item))
+            var exclusions = rule.ExcludeTags;
+            if (exclusions == null || exclusions.Length == 0 || existingTags == null || existingTags.Length == 0)
             {
                 return false;
             }
 
+            return exclusions
+                .Where(tag => !string.IsNullOrWhiteSpace(tag))
+                .Select(tag => tag.Trim())
+                .Any(tag => existingTags.Contains(tag, StringComparer.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Applies any missing configured tags to the item and saves it. Tagging is additive;
+        /// existing tags are never removed. An item excluded by every matching rule is left
+        /// untouched, including its lock state.
+        /// </summary>
+        /// <param name="item">The item to tag.</param>
+        /// <param name="metadataSettled">
+        /// Whether the metadata providers have finished with this item. Locking the Tags field
+        /// stops the providers writing to it at all, so the lock must never be taken on the
+        /// ItemAdded path: that fires before the first refresh and would cost the item every
+        /// tag its metadata source would have supplied.
+        /// </param>
+        /// <returns><c>true</c> if the item was written to the repository.</returns>
+        public bool Apply(BaseItem item, bool metadataSettled)
+        {
             var configuration = Configuration;
-            var wanted = GetTagsForItem(item);
+            if (configuration == null || !IsTaggable(item, configuration))
+            {
+                return false;
+            }
+
+            // Exclusions are evaluated against the tags the item carries on entry, so the
+            // order in which rules are applied cannot change the outcome.
+            var existing = item.Tags ?? new string[0];
+
+            var wanted = GetConfiguredTags(item, existing);
             if (wanted.Length == 0)
             {
                 return false;
             }
 
-            var existing = item.Tags ?? new string[0];
             var missing = wanted
                 .Where(tag => !existing.Contains(tag, StringComparer.OrdinalIgnoreCase))
                 .ToArray();
 
             var lockedFields = item.LockedFields ?? new MetadataFields[0];
-            var needsLock = configuration.LockTags && !lockedFields.Contains(MetadataFields.Tags);
+            var needsLock = configuration.LockTags
+                && metadataSettled
+                && !lockedFields.Contains(MetadataFields.Tags);
 
             if (missing.Length == 0 && !needsLock)
             {
@@ -244,6 +318,11 @@ namespace AutoTagger.Services
         /// </code>
         /// Jellyfin's equivalent was <c>UpdateToRepositoryAsync(ItemUpdateType, CancellationToken)</c>,
         /// which is why the whole call chain here is synchronous rather than async.
+        /// <para>
+        /// The update reason matters beyond bookkeeping: this write raises ILibraryManager.ItemUpdated,
+        /// and AutoTagEntryPoint ignores MetadataEdit precisely so that saving a tag cannot re-enter
+        /// the handler that saved it.
+        /// </para>
         /// </remarks>
         private void SaveItem(BaseItem item)
         {

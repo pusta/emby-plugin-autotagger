@@ -13,6 +13,7 @@ namespace AutoTagger.Configuration
             LibraryId = string.Empty;
             LibraryName = string.Empty;
             Tags = new string[0];
+            ExcludeTags = new string[0];
         }
 
         /// <summary>
@@ -35,5 +36,15 @@ namespace AutoTagger.Configuration
         /// Gets or sets the tags to apply. Comparison is case-insensitive.
         /// </summary>
         public string[] Tags { get; set; }
+
+        /// <summary>
+        /// Gets or sets the tags that suppress this rule. If an item already carries any of
+        /// these tags, this library's tags are not applied to it. Comparison is case-insensitive.
+        /// </summary>
+        /// <remarks>
+        /// Older configuration files predate this field, so XmlSerializer leaves it null on load
+        /// rather than running the constructor's initializer. Every read of it is null-tolerant.
+        /// </remarks>
+        public string[] ExcludeTags { get; set; }
     }
 }
